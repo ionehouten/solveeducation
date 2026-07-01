@@ -60,15 +60,27 @@ resource "aws_security_group" "app" {
   vpc_id = aws_vpc.main.id
 
   ingress {
-    from_port   = 0
-    to_port     = 65535
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    from_port       = 8080
+    to_port         = 8080
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb.id]
   }
 
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_security_group" "alb" {
+  name   = "${var.app_name}-alb-sg"
+  vpc_id = aws_vpc.main.id
+
   ingress {
-    from_port   = 22
-    to_port     = 22
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -89,22 +101,64 @@ resource "aws_ecr_repository" "app" {
 
 # --- IAM ----------------------------------------------------------------
 
-resource "aws_iam_role" "ecs_task" {
-  name = "${var.app_name}-task-role"
+data "aws_iam_policy_document" "ecs_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    effect  = "Allow"
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
 
-  assume_role_policy = jsonencode({
+resource "aws_iam_role" "ecs_task" {
+  name               = "${var.app_name}-task-role"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+  # No policies attached: this app makes no AWS API calls today.
+}
+
+resource "aws_iam_role" "ecs_execution" {
+  name               = "${var.app_name}-execution-role"
+  assume_role_policy = data.aws_iam_policy_document.ecs_assume_role.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_managed" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role_policy" "ecs_execution_secrets" {
+  name = "${var.app_name}-execution-secrets"
+  role = aws_iam_role.ecs_execution.id
+
+  policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Effect = "Allow"
+      Action = ["secretsmanager:GetSecretValue"]
+      Resource = [
+        aws_secretsmanager_secret.db_host.arn,
+        aws_secretsmanager_secret.db_password.arn,
+        aws_secretsmanager_secret.api_token.arn,
+      ]
     }]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "ecs_task_admin" {
-  role       = aws_iam_role.ecs_task.name
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+
+# Secret values are intentionally created outside Terraform
+# (Console / CLI / CI) to avoid storing plaintext secrets in state.
+resource "aws_secretsmanager_secret" "db_host" {
+  name = "${var.app_name}/db_host"
+}
+
+resource "aws_secretsmanager_secret" "db_password" {
+  name = "${var.app_name}/db_password"
+}
+
+resource "aws_secretsmanager_secret" "api_token" {
+  name = "${var.app_name}/api_token"
 }
 
 # --- Load balancer ------------------------------------------------------
@@ -113,7 +167,7 @@ resource "aws_lb" "app" {
   name               = "${var.app_name}-alb"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.app.id]
+  security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
 }
 
@@ -123,6 +177,7 @@ resource "aws_lb_target_group" "app" {
   protocol    = "HTTP"
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
+
 }
 
 resource "aws_lb_listener" "http" {
@@ -142,6 +197,7 @@ resource "aws_ecs_cluster" "main" {
   name = "${var.app_name}-cluster"
 }
 
+
 resource "aws_ecs_task_definition" "app" {
   family                   = var.app_name
   requires_compatibilities = ["FARGATE"]
@@ -149,7 +205,7 @@ resource "aws_ecs_task_definition" "app" {
   cpu                      = "256"
   memory                   = "512"
   task_role_arn            = aws_iam_role.ecs_task.arn
-  execution_role_arn       = aws_iam_role.ecs_task.arn
+  execution_role_arn       = aws_iam_role.ecs_execution.arn
 
   container_definitions = jsonencode([{
     name      = var.app_name
@@ -159,9 +215,22 @@ resource "aws_ecs_task_definition" "app" {
       containerPort = 8080
       hostPort      = 8080
     }]
-    environment = [
-      { name = "DB_PASSWORD", value = var.db_password }
+
+    secrets = [
+      {
+        name      = "DB_HOST"
+        valueFrom = aws_secretsmanager_secret.db_host.arn
+      },
+      {
+        name      = "DB_PASSWORD"
+        valueFrom = aws_secretsmanager_secret.db_password.arn
+      },
+      {
+        name      = "API_TOKEN"
+        valueFrom = aws_secretsmanager_secret.api_token.arn
+      }
     ]
+
   }])
 }
 
@@ -183,4 +252,8 @@ resource "aws_ecs_service" "app" {
     container_name   = var.app_name
     container_port   = 8080
   }
+
+  depends_on = [
+    aws_lb_listener.http
+  ]
 }

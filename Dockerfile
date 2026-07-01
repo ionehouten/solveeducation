@@ -6,7 +6,6 @@ COPY . .
 
 RUN pip install -r app/requirements.txt
 
-ENV DB_PASSWORD=SuperSecret123!
 
 EXPOSE 8080
 
