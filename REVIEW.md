@@ -35,3 +35,45 @@ Secret values are intentionally expected to be created out-of-band (CLI, Console
 | 15 | ALB listener is HTTP-only, no TLS | Traffic travels in plaintext | **Documented, not fixed**,  needs an ACM cert + 443 listener + 80→443 redirect; needs a real domain, out of scope for a "no AWS account, don't deploy" exercise | Nice-to-have | Not fixed |
 
 
+## Monitoring 
+
+I would monitor ALB `UnHealthyHostCount`, `HTTPCode_Target_5XX_Count`, and the ECS service's running task count using CloudWatch alarms.
+
+Deployments now use immutable `${{ github.sha }}` image tags, allowing rollback by redeploying a previous image tag or ECS task definition revision.
+
+## Verification
+
+
+```bash
+cd infra
+terraform fmt -check
+terraform init && terraform validate
+
+```
+```bash
+docker build -t demo-api .
+pytest app/
+```
+
+
+## What I'd do with more time
+
+**These are production-context observations,  I'm aware the current structure is intentional for an assessment of this scope, not a real production system.**
+
+* **Infrastructure and application lifecycle coupling** 
+Infrastructure provisioning and application deployment are currently handled within the same Terraform workflow, since ECS service configuration and image versioning are managed together in a single apply cycle.
+
+* **Terraform state management and governance**
+Add an S3 backend with state locking to provide a single source of truth for Terraform state. Introduce a `terraform plan` step on pull requests and require manual approval before `terraform apply` on the main branch to improve change visibility and reduce risk of unintended infrastructure changes.
+
+* **CI/CD security improvements**
+Secret scanning (Gitleaks) was added because it provides immediate value with minimal complexity and helps prevent accidental credential leakage. Additional improvements such as dependency scanning, container scanning, SBOM generation, image signing (Cosign), and policy enforcement would be natural next steps, but are out of scope for this timebox.
+
+* **CI/CD maintainability**
+Standardizing deployments using reusable GitHub Actions workflows would reduce duplication, improve consistency across services, and simplify long-term maintenance.
+
+* **Production readiness improvements**
+Enable HTTPS termination using ACM (443 listener with HTTP → HTTPS redirect), increase ECS service desired_count to at least 2 for basic high availability, and configure ECS Service Auto Scaling based on CPU and/or memory utilization.
+
+* **Resource tagging**
+Apply a consistent tagging strategy (for example Name, Environment, Application, Owner, and CostCenter) across AWS resources to improve cost allocation, operational visibility, governance, and resource management.
