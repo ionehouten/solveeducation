@@ -12,34 +12,69 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: us-east-1
+      ECR_URL: 123456789012.dkr.ecr.us-east-1.amazonaws.com/demo-api
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+
+      - name: Run Secret Scanning
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 detect \
+            --source=/repo \
+            --report-format sarif \
+            --report-path /repo/gitleaks.sarif \
+            --exit-code 1
+
+
+      - name: Upload SARIF to Github Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4 
+        with:
+          sarif_file: gitleaks.sarif
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      - name: Install deps
-        run: pip install -r app/requirements.txt pytest
+      - name: Install dependencies
+        run: |
+          pip install -r app/requirements.txt pytest
 
       - name: Run tests
-        continue-on-error: true
         run: pytest app/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ env.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ env.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push image
         run: |
-          docker build -t $ECR_URL:latest .
+          docker build \
+            -t $ECR_URL:${{ github.sha }} \
+            -t $ECR_URL:latest .
+
+          docker push $ECR_URL:${{ github.sha }}
           docker push $ECR_URL:latest
-        env:
-          ECR_URL: 123456789012.dkr.ecr.us-east-1.amazonaws.com/demo-api
 
       - name: Terraform apply
         working-directory: infra
         run: |
           terraform init
-          terraform apply -auto-approve
+          terraform apply \
+            -auto-approve \
+            -var="image_tag=${{ github.sha }}"
 
       - name: Force new deployment
         run: |
