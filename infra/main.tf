@@ -147,6 +147,7 @@ resource "aws_iam_role_policy" "ecs_execution_secrets" {
 }
 
 
+
 # Secret values are intentionally created outside Terraform
 # (Console / CLI / CI) to avoid storing plaintext secrets in state.
 resource "aws_secretsmanager_secret" "db_host" {
@@ -178,6 +179,14 @@ resource "aws_lb_target_group" "app" {
   vpc_id      = aws_vpc.main.id
   target_type = "ip"
 
+  health_check {
+    path                = "/health"
+    healthy_threshold   = 2
+    unhealthy_threshold = 5
+    timeout             = 5
+    interval            = 15
+    matcher             = "200"
+  }
 }
 
 resource "aws_lb_listener" "http" {
@@ -195,6 +204,11 @@ resource "aws_lb_listener" "http" {
 
 resource "aws_ecs_cluster" "main" {
   name = "${var.app_name}-cluster"
+}
+
+resource "aws_cloudwatch_log_group" "app" {
+  name              = "/ecs/${var.app_name}"
+  retention_in_days = 30
 }
 
 
@@ -231,6 +245,14 @@ resource "aws_ecs_task_definition" "app" {
       }
     ]
 
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        awslogs-group         = aws_cloudwatch_log_group.app.name
+        awslogs-region        = var.aws_region
+        awslogs-stream-prefix = "ecs"
+      }
+    }
   }])
 }
 

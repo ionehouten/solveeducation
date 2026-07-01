@@ -1,11 +1,15 @@
-FROM python:latest
+FROM python:3.12-slim
 
 WORKDIR /app
 
+COPY app/requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt && \
+    useradd --system appuser
+
 COPY . .
 
-RUN pip install -r app/requirements.txt
-
+USER appuser
 
 EXPOSE 8080
 
